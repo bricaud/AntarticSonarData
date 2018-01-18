@@ -3,10 +3,40 @@
 """
 from datetime import datetime
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 import skimage
 import skimage.exposure
 
+
+#########################################################
+## Data extraction
+
+def extract_data(filename,max_depth=100):
+	df = pd.read_csv(filename, delimiter=',', skipinitialspace=True)
+	info_df = df.iloc[:,:13]
+	data= np.array(df.iloc[:,13:]).transpose()
+	print('Data matrix size:',data.shape)
+	depth_data = compute_depth_data(info_df)
+	speed_vector,speed_averaged_vector = extract_speeds(info_df)
+	info_df['speed'] = speed_vector
+	info_df['speed_averaged'] = speed_averaged_vector
+	data_trunc = cut_echogram(data,max_depth,depth_data)
+	return info_df,data_trunc,depth_data
+
+
+def cut_echogram(data,depth,depth_data):
+	""" Reduce the echogram to the values above 'depth'
+		'depth' is the maximal depth in meters
+	"""
+	cutoff = depth_to_sample(depth,depth_data)
+	print('Echogram truncated to the first {} meters ({} pixels).'.format(depth,cutoff))
+	return data[:cutoff,:]
+
+
+
+#####################################################
+## Processing speed
 def get_date(ping_date,ping_time,ping_milliseconds):
 	microseconds = str(ping_milliseconds)+'000'
 	if len(microseconds)==5:
@@ -63,6 +93,8 @@ def plot_speeds(df):
 
 
 #####################
+## Depth processing
+
 def depth_variation(df):
 	variations = np.std(df['Depth_start'])+np.std(df['Depth_stop'])+np.std(df['Sample_count'])
 	if variations > 1:
@@ -101,33 +133,6 @@ def depth_to_sample(depth,depth_data):
 	"""
 	return int((depth - depth_data['depth_start']) / depth_data['depth_per_pixel'] - 0.5)
 
-def extract_data(filename,max_depth=100):
-	df = pd.read_csv(filename, delimiter=',', skipinitialspace=True)
-	info_df = df.iloc[:,:13]
-	data= np.array(df.iloc[:,13:]).transpose()
-	print('Data matrix size:',data.shape)
-	depth_data = compute_depth_data(df)
-	data_trunc = cut_echogram(data,max_depth,depth_data)
-	return info_df,data_trunc,depth_data
-
-######################################
-
-def show_echogram(data,depth_data):
-	plt.figure()
-	plt.imshow(data,aspect='auto')
-	ticks = np.arange(0,data.shape[0],100)
-	ticks_labels = [int(get_sample_depth(t,depth_data)) for t in ticks]
-	plt.yticks(ticks,ticks_labels)
-	plt.xlabel('Ping index')
-	plt.ylabel('Depth (m)')
-	plt.title('Echogram')
-	plt.show()
-
-def cut_echogram(data,depth,depth_data):
-	""" Reduce the echogram to the values above 'depth'
-	"""
-	cutoff = depth_to_sample(depth,depth_data)
-	return data[:cutoff,:]
 
 
 #########################################
@@ -174,7 +179,8 @@ def substract_meanovertime(image):
 
 def gaussian_filter(image):
 	from skimage.filters import gaussian
-	gauss_denoised = gaussian(image,5)
+	sigma = [15,2]
+	gauss_denoised = gaussian(image,sigma)
 	return gauss_denoised
 
 ###optional##
@@ -190,18 +196,38 @@ def filter_data(data):
 	gauss_denoised = gaussian_filter(data2)
 	return gauss_denoised
 
-######################## Krill detection #############################
-def krill_function(image):
+def show_echogram(data,depth_data):
+	plt.figure()
+	plt.imshow(data,aspect='auto')
+	ticks = np.arange(0,data.shape[0],100)
+	ticks_labels = [int(get_sample_depth(t,depth_data)) for t in ticks]
+	plt.yticks(ticks,ticks_labels)
+	plt.xlabel('Ping index')
+	plt.ylabel('Depth (m)')
+	plt.title('Echogram')
+	plt.show()
+
+
+#####################################################################
+## Krill detection
+
+def krill_function(image,threshold=0.5):
+	""" Return a binary function 
+		where a positive value means the presence of krill in the ping
+		The second output value is a control value.
+	"""
 	energy = np.sqrt(np.sum(image**2,0))
 	energy_fluctuation = np.std(energy)
 	normalized_energy = (energy-np.mean(energy))/energy_fluctuation
 	binary_signal = normalized_energy.copy()
-	threshold = 0.5
 	binary_signal[binary_signal<threshold] = 0
 	binary_signal[binary_signal>threshold] = 100
 	return binary_signal,energy_fluctuation
 
 def extract_krillchunks(binary_signal,data):
+	""" Return a list of numpy array
+	Each array corresponds to a krill swarm
+	"""
 	krill_chunks = []
 	krill_dic = {}
 	data_len = len(binary_signal)
@@ -220,18 +246,68 @@ def extract_krillchunks(binary_signal,data):
 				krill_dic = {}
 	return krill_chunks
 
-def record_starttimeandposition(krill_dic,idx,info_df):
-	# record latitude and longitude
-	krill_dic['latitude_start'] = info_df.iloc[idx,3]
-	krill_dic['longitude_start'] = info_df.iloc[idx,4]
-	krill_dic['date_start'] = info_df.iloc[idx,1]
-	krill_dic['time_start'] = info_df.iloc[idx,2]
-	return krill_dic
+###########################################################################
+## Extraction of krill characteristics
 
-def record_stoptimeandposition(krill_dic,idx,info_df):
-	# record latitude and longitude
-	krill_dic['latitude_stop'] = df.iloc[idx,3]
-	krill_dic['longitude_stop'] = df.iloc[idx,4]
-	krill_dic['date_stop'] = df.iloc[idx,1]
-	krill_dic['time_stop'] = df.iloc[idx,2]
-	return krill_dic
+def swarm_depth(data):
+	distribution = np.sum(data,axis=1)
+	# Keep only the highest values above the noise
+	distribution[distribution<0.5*np.max(distribution)] = 0
+	density = distribution/np.sum(distribution)
+	depth_coord = np.arange(0,len(density))
+	mean_point = np.sum(density*depth_coord) # mean of the distribution
+	sigma = np.sqrt((np.sum(density*(depth_coord-mean_point)**2))) # standard deviation
+	height = 4 * sigma
+	return mean_point,height
+
+def timeandposition(idx,info_df):
+	# Return latitude, longitude, date and time of the ping 'idx'
+
+	latitude = info_df['Latitude'][idx] # info_df.iloc[idx,3]
+	longitude = info_df['Longitude'][idx] #info_df.iloc[idx,4]
+	date = info_df['Ping_date'][idx] # info_df.iloc[idx,1]
+	time = info_df['Ping_time'][idx] # info_df.iloc[idx,2]
+	return latitude,longitude,date,time
+
+
+def swarm_infos(krill_chunk,info_df,depth_data,filename):
+	miles_to_meter = 1852
+	krill_info = {}
+	krill_start = krill_chunk['Ping_start_index']
+	krill_stop = krill_chunk['Ping_end_index']
+	krill_info['ping_index_start'] = krill_start
+	krill_info['ping_index_stop'] = krill_stop
+	krill_info['filename'] = filename 
+	krill_length_in_pings = krill_stop-krill_start
+	krill_length = (info_df['Distance_gps'][krill_stop] -
+	 info_df['Distance_gps'][krill_start]) * miles_to_meter
+	krill_info['length'] = krill_length
+	middle_location = int(krill_start + krill_length_in_pings / 2)
+	latitude,longitude,date,time = timeandposition(middle_location, info_df)
+	krill_info['latitude'] = latitude
+	krill_info['longitude'] = longitude
+	krill_info['date'] = date
+	krill_info['time'] = time
+	krill_info['boat speed'] = info_df['speed_averaged'][middle_location]
+	mean_depth,height = swarm_depth(krill_chunk['data'])
+	krill_info['depth_in_pixels'] = mean_depth
+	krill_info['height_in_pixels'] = height
+	krill_info['depth'] = get_sample_depth(mean_depth,depth_data)
+	krill_info['height'] = height * depth_data['depth_per_pixel']
+	return krill_info
+
+def krill_brightness(swarm_infos_dic,data):
+	krill_start = swarm_infos_dic['ping_index_start']
+	krill_stop = swarm_infos_dic['ping_index_stop']
+	krill_top = int(swarm_infos_dic['depth_in_pixels']-swarm_infos_dic['height_in_pixels']/2)
+	krill_bottom = int(swarm_infos_dic['depth_in_pixels']+swarm_infos_dic['height_in_pixels']/2)
+	#print(krill_start,krill_stop,krill_top,krill_bottom)
+	krill_window = data[krill_top:krill_bottom+1,krill_start:krill_stop]
+	#return krill_window
+	krill_b = np.sum(krill_window)
+	window_surface = (krill_stop - krill_start) * (krill_bottom - krill_top)
+	if window_surface == 0:
+		krill_b_per_pixel = 0
+	else:
+		krill_b_per_pixel = krill_b/window_surface
+	return krill_b,krill_b_per_pixel
