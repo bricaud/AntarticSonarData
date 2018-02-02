@@ -16,12 +16,14 @@ def extract_data(filename,max_depth=100):
 	df = pd.read_csv(filename, delimiter=',', skipinitialspace=True)
 	info_df = df.iloc[:,:13]
 	data= np.array(df.iloc[:,13:]).transpose()
+	print('------------------------------')
 	print('Data matrix size:',data.shape)
 	depth_data = compute_depth_data(info_df)
 	speed_vector,speed_averaged_vector = extract_speeds(info_df)
 	info_df['speed'] = speed_vector
 	info_df['speed_averaged'] = speed_averaged_vector
 	data_trunc = cut_echogram(data,max_depth,depth_data)
+	print('-----------------------------')
 	return info_df,data_trunc,depth_data
 
 
@@ -249,16 +251,33 @@ def extract_krillchunks(binary_signal,data):
 ###########################################################################
 ## Extraction of krill characteristics
 
+# def swarm_depth(data):
+# 	distribution = np.sum(data,axis=1)
+# 	# Keep only the highest values above the noise
+# 	distribution = distribution - np.min(distribution) # values can be negatives
+# 	distribution_thres = distribution.copy()
+# 	distribution_thres[distribution<0.5*np.max(distribution)] = 0
+# 	density = distribution_thres/np.sum(distribution_thres)
+# 	depth_coord = np.arange(0,len(density))
+# 	mean_point = np.sum(density*depth_coord) # mean of the distribution
+# 	sigma = np.sqrt((np.sum(density*(depth_coord-mean_point)**2))) # standard deviation
+# 	height = 4 * sigma
+# 	return mean_point,height
+
 def swarm_depth(data):
-	distribution = np.sum(data,axis=1)
-	# Keep only the highest values above the noise
-	distribution[distribution<0.5*np.max(distribution)] = 0
-	density = distribution/np.sum(distribution)
-	depth_coord = np.arange(0,len(density))
-	mean_point = np.sum(density*depth_coord) # mean of the distribution
-	sigma = np.sqrt((np.sum(density*(depth_coord-mean_point)**2))) # standard deviation
-	height = 4 * sigma
-	return mean_point,height
+	data_t = data.transpose()
+	binary_distribution,energy = krill_function(data_t)
+	krill_chunks = extract_krillchunks(binary_distribution,data_t)
+	height_list = []
+	mean_point_list = []
+	for chunk in krill_chunks:
+		top = chunk['Ping_start_index']
+		bottom = chunk['Ping_end_index']
+		height_list.append( bottom - top)
+		mean_point_list.append((bottom + top) / 2)
+	if len(mean_point_list) > 1:
+		print('More than one swarm! number:',len(mean_point_list))
+	return mean_point_list[0],height_list[0]
 
 def timeandposition(idx,info_df):
 	# Return latitude, longitude, date and time of the ping 'idx'
@@ -296,6 +315,18 @@ def swarm_infos(krill_chunk,info_df,depth_data,filename):
 	krill_info['height'] = height * depth_data['depth_per_pixel']
 	return krill_info
 
+def info_from_swarm_list(swarm_echo_list,echogram,info_df,depth_data,data_filename):
+	swarm_info_list = []
+	for swarm_echo in swarm_echo_list:
+		info_dic = swarm_infos(swarm_echo,info_df,depth_data,data_filename)
+		biomass,biomass_per_pixel = krill_brightness(info_dic,echogram)
+		info_dic['biomass'] = biomass
+		info_dic['biomass_per_pixel'] = biomass_per_pixel
+		swarm_info_list.append(info_dic)
+	return swarm_info_list
+		
+
+
 def krill_brightness(swarm_infos_dic,data):
 	krill_start = swarm_infos_dic['ping_index_start']
 	krill_stop = swarm_infos_dic['ping_index_stop']
@@ -304,7 +335,7 @@ def krill_brightness(swarm_infos_dic,data):
 	#print(krill_start,krill_stop,krill_top,krill_bottom)
 	krill_window = data[krill_top:krill_bottom+1,krill_start:krill_stop]
 	#return krill_window
-	krill_b = np.sum(krill_window)
+	krill_b = np.sum(10**(krill_window)/10)
 	window_surface = (krill_stop - krill_start) * (krill_bottom - krill_top)
 	if window_surface == 0:
 		krill_b_per_pixel = 0
