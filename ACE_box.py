@@ -220,6 +220,8 @@ def krill_function(image,threshold=0.5):
 	"""
 	energy = np.sqrt(np.sum(image**2,0))
 	energy_fluctuation = np.std(energy)
+	if energy_fluctuation == 0:
+		raise ValueError('The echogram has constant values! Image size:',image.shape)
 	normalized_energy = (energy-np.mean(energy))/energy_fluctuation
 	binary_signal = normalized_energy.copy()
 	binary_signal[binary_signal<threshold] = 0
@@ -230,8 +232,8 @@ def extract_krillchunks(binary_signal,data):
 	""" Return a list of numpy array
 	Each array corresponds to a krill swarm
 	"""
+	minimal_swarm_length = 2
 	krill_chunks = []
-	krill_dic = {}
 	data_len = len(binary_signal)
 	for idx in range(data_len):
 		if binary_signal[idx] >0:
@@ -240,13 +242,76 @@ def extract_krillchunks(binary_signal,data):
 				krill_start = idx
 			if idx == data_len-1 or binary_signal[idx+1] == 0:
 				# end of krill detection
-				krill_dic['Ping_start_index'] = krill_start 
-				krill_dic['Ping_end_index'] = idx
-				krill_dic['data'] = data[:,krill_start:idx+1]
-				# store krill layer in list
-				krill_chunks.append(krill_dic)
-				krill_dic = {}
+				# Check if length is too small (artefact)
+				if idx - krill_start >= minimal_swarm_length:
+					krill_dic_list = process_chunk(data,krill_start,idx)
+					# store the krill layers in list
+					krill_chunks = krill_chunks + krill_dic_list
 	return krill_chunks
+
+def process_chunk(data,krill_start,krill_stop):
+	krill_dic = {}
+	krill_dic['Ping_start_index'] = krill_start 
+	krill_dic['Ping_end_index'] = krill_stop
+	krill_dic['data'] = data[:,krill_start:krill_stop+1]
+	# Check if several swarms in the data
+	#data_t = krill_dic['data'].transpose()
+	#binary_signal,energy = krill_function(data_t)
+	swarm_list = separate_verticalswarms(krill_dic)
+	return swarm_list
+
+def separate_verticalswarms(krill_dic):
+	data = krill_dic['data']
+	data_t = data.transpose()
+	binary_signal,energy = krill_function(data_t)
+	min_echo = np.min(data_t)
+	#print('min',min_echo)
+	data_list = []
+	data_len = len(binary_signal)
+	isolated_swarm_list = []
+	for idx in range(data_len):
+		if binary_signal[idx] >0:
+			if idx==0 or binary_signal[idx-1] == 0:
+				# start of krill swarm
+				krill_start_depth = idx
+			if idx == data_len-1 or binary_signal[idx+1] == 0:
+				# end of krill swarm
+				single_swarm_dic = {}
+				single_swarm_dic['Ping_start_index'] = krill_dic['Ping_start_index'] 
+				single_swarm_dic['Ping_end_index'] = krill_dic['Ping_end_index']
+				single_swarm = np.ones(data.shape) * min_echo
+				single_swarm[krill_start_depth:idx+1,:] = data[krill_start_depth:idx+1,:]
+				#print(single_swarm.shape, krill_start_depth, idx+1)
+				single_swarm_dic['data'] = single_swarm				
+				#RESIZE SWARM LENGTH HERE
+				single_swarm_dic = tighten_swarm_window(single_swarm_dic)
+				#print(single_swarm_dic['data'].shape)
+				# store krill layer in list
+				isolated_swarm_list.append(single_swarm_dic)
+	return isolated_swarm_list
+
+def tighten_swarm_window(single_swarm_dic):
+	data = single_swarm_dic['data']
+	#binary_signal,energy = krill_function(data)
+	energy = np.sqrt(np.sum(data**2,0))
+	max_brightness = np.max(energy)
+	data_len = len(energy)
+	rate = 0.1 # rate threshold
+	#reduce on the left
+	for idx in range(data_len):
+		if energy[idx] < max_brightness*rate:
+			single_swarm_dic['Ping_start_index'] +=1
+			single_swarm_dic['data'] = single_swarm_dic['data'][:,1:]
+		else:
+			break
+	#reduce on the right
+	for idx in range(data_len):
+		if energy[data_len - 1 - idx] < max_brightness*rate:
+			single_swarm_dic['Ping_end_index'] -=1
+			single_swarm_dic['data'] = single_swarm_dic['data'][:,:-1]
+		else:
+			break
+	return single_swarm_dic
 
 ###########################################################################
 ## Extraction of krill characteristics
@@ -264,20 +329,48 @@ def extract_krillchunks(binary_signal,data):
 # 	height = 4 * sigma
 # 	return mean_point,height
 
+# def swarm_depth(data):
+# 	data_t = data.transpose()
+# 	binary_distribution,energy = krill_function(data_t)
+# 	krill_chunks = extract_krillchunks(binary_distribution,data_t)
+# 	height_list = []
+# 	mean_point_list = []
+# 	for chunk in krill_chunks:
+# 		top = chunk['Ping_start_index']
+# 		bottom = chunk['Ping_end_index']
+# 		height_list.append( bottom - top)
+# 		mean_point_list.append((bottom + top) / 2)
+# 	if len(mean_point_list) > 1:
+# 		print('More than one swarm! number:',mean_point_list,height_list)
+# 	if len(mean_point_list) == 0:
+# 		print('Nothing found in the chunk')
+# 		return 0,0
+# 	print('Swarm found')
+# 	return mean_point_list[0],height_list[0]
+
+
 def swarm_depth(data):
 	data_t = data.transpose()
-	binary_distribution,energy = krill_function(data_t)
-	krill_chunks = extract_krillchunks(binary_distribution,data_t)
-	height_list = []
-	mean_point_list = []
-	for chunk in krill_chunks:
-		top = chunk['Ping_start_index']
-		bottom = chunk['Ping_end_index']
-		height_list.append( bottom - top)
-		mean_point_list.append((bottom + top) / 2)
-	if len(mean_point_list) > 1:
-		print('More than one swarm! number:',len(mean_point_list))
-	return mean_point_list[0],height_list[0]
+	binary_signal,energy = krill_function(data_t)
+	data_len = len(binary_signal)
+	# initialize
+	height = 0
+	mean_point = 0
+	for idx in range(data_len):
+		if binary_signal[idx] >0:
+			if idx==0 or binary_signal[idx-1] == 0:
+				# start of krill swarm
+				swarm_top = idx
+			if idx == data_len-1 or binary_signal[idx+1] == 0:
+				# end of krill swarm
+				swarm_bottom = idx
+				height = swarm_bottom - swarm_top
+				mean_point = (swarm_bottom + swarm_top) / 2
+	#if height == 0:
+	#	print('Swarm with height = 0 !')
+	return mean_point, height
+
+
 
 def timeandposition(idx,info_df):
 	# Return latitude, longitude, date and time of the ping 'idx'
@@ -335,7 +428,7 @@ def krill_brightness(swarm_infos_dic,data):
 	#print(krill_start,krill_stop,krill_top,krill_bottom)
 	krill_window = data[krill_top:krill_bottom+1,krill_start:krill_stop]
 	#return krill_window
-	krill_b = np.sum(10**(krill_window)/10)
+	krill_b = np.sum(10**(krill_window/10))
 	window_surface = (krill_stop - krill_start) * (krill_bottom - krill_top)
 	if window_surface == 0:
 		krill_b_per_pixel = 0
