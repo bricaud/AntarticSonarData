@@ -7,7 +7,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import skimage
 import skimage.exposure
-
+from skimage.filters import gaussian, median
 
 #########################################################
 ## Data extraction
@@ -121,6 +121,7 @@ def compute_depth_data(df):
 	transducer_depth = 8.4 # transducer under the ship, below the see level	
 	depth_data['depth_start'] = transducer_depth + df['Range_start'][0]
 	depth_data['depth_per_pixel'] = get_depth_per_pixel(df)
+	depth_data['depth_stop'] = df['Depth_stop'][0]
 	return depth_data
 
 def get_sample_depth(sample,depth_data):
@@ -153,37 +154,80 @@ def binary_impulse(Sv, threshold=10):
 	:param threshold: threshold-value (dB re 1m^-1)
 	:type  threshold: float
 	return:
-	:param mask: binary mask (0 - noise; 1 - signal)
-	:type  mask: 2D numpy.array
-	desc: generate threshold mask    
+	:param image: denoised image   
 	'''
-	mask = np.ones(Sv.shape).astype(int)
+	mask = Sv.copy()
 	samples,pings = Sv.shape
+	nb_noisy = 0
 	for sample in range(1, samples-1):
 		for ping in range(0, pings):
 			a = Sv[sample-1, ping]
 			b = Sv[sample, ping]
 			c = Sv[sample+1, ping]
 			if (b - a > threshold) & (b - c > threshold):
-				mask[sample, ping] = 0
+				mask[sample, ping] = (a+c)/2
+				nb_noisy +=1
+	print('Number of noisy pixels removed: ',nb_noisy)
 	return mask
 
+
+def fast_binary_impulse(image):
+	''' remove vertical lines in the echogram 
+	'''
+	mask = image.copy()
+	rshift = np.roll(image,1,axis=1)
+	lshift = np.roll(image,-1,axis=1)
+	grad = image - rshift + image - lshift
+	mask[grad>np.max(grad)/10]=1
+	mask[grad<=np.max(grad)/10]=0
+	#print('Gradients',np.max(grad),np.min(grad))
+	#mask[grad>10]=1
+	#mask[grad<=10]=0
+	
+	nb_noisy = np.sum(mask)
+	data_d = image.copy()
+	data_d[mask==1] = (rshift[mask==1] + lshift[mask==1]) / 2
+	print('Number of noisy pixels removed: ',nb_noisy)
+	return data_d
+
 def remove_vertical_lines(image):
-	databi = binary_impulse(image.transpose(), threshold=np.max(image))
-	print('Number of noisy pixels: ',databi.size-np.sum(databi))
-	# Replace the noisy pixels by the minimal value of the image (may not be zero)
-	return databi.transpose()*image+(1-databi.transpose())*np.min(image)
+	#databi = binary_impulse(image.transpose(), threshold=np.max(image))
+	#return databi.transpose()
+	data_clean = fast_binary_impulse(image)
+	return data_clean
 
 def substract_meanovertime(image):
 	""" Substract the mean over time.
 	"""
 	return image - np.mean(image,1,keepdims=True)
 
+def substract_lin_meanovertime(echogram):
+	lin_echogram = 10**(echogram/20)
+	data_lin = lin_echogram - np.mean(lin_echogram,1,keepdims=True)
+	echogram_f = 20*np.log10(data_lin-np.min(data_lin)+0.00001)
+	return echogram_f
+
 def gaussian_filter(image):
-	from skimage.filters import gaussian
 	sigma = [15,2]
 	gauss_denoised = gaussian(image,sigma)
 	return gauss_denoised
+
+def remove_background_noise(data,depth_data):
+	alpha = 0.0394177
+	ref_depth = depth_data['depth_stop'] # 100m is 537 pixels
+	data_trunc_ref = data
+	Sv_ref = data_trunc_ref[-1,:]
+	offset = np.mean(Sv_ref)- 20* np.log10(ref_depth)-2*alpha*ref_depth
+	depth_values = np.linspace(depth_data['depth_start'],ref_depth,len(data_trunc_ref[:,0]))
+	bg_noise = offset + 20 * np.log10(depth_values) + 2 * alpha * depth_values
+	
+	lin_echogram = 10**(data/10)
+	bg_noise_matrix = np.tile(bg_noise,(lin_echogram.shape[1],1)).transpose()
+	lin_bg_noise = 10**(bg_noise_matrix/10)
+	#data_lin = lin_echogram - np.mean(lin_echogram,1,keepdims=True)
+	data_lin = lin_echogram - lin_bg_noise
+	echogram_f = 10*np.log10(data_lin - np.min(data_lin) + 0.00000000001)
+	return echogram_f
 
 ###optional##
 def denoisewavelet(image):
@@ -194,6 +238,8 @@ def denoisewavelet(image):
 def filter_data(data):
 	data_rescale = fix_contrast(data)
 	data2 = remove_vertical_lines(data_rescale)
+	#data2 = median(data_rescale)
+	data2 = substract_lin_meanovertime(data2)
 	data2 = substract_meanovertime(data2)
 	gauss_denoised = gaussian_filter(data2)
 	return gauss_denoised
@@ -410,9 +456,12 @@ def swarm_infos(krill_chunk,info_df,depth_data,filename):
 
 def info_from_swarm_list(swarm_echo_list,echogram,info_df,depth_data,data_filename):
 	swarm_info_list = []
+	# Correct for the amplification along depth	
+	echogram_rectif = remove_background_noise(echogram,depth_data)
+
 	for swarm_echo in swarm_echo_list:
 		info_dic = swarm_infos(swarm_echo,info_df,depth_data,data_filename)
-		biomass,biomass_per_pixel = krill_brightness(info_dic,echogram)
+		biomass,biomass_per_pixel = krill_brightness(info_dic,echogram_rectif)
 		info_dic['biomass'] = biomass
 		info_dic['biomass_per_pixel'] = biomass_per_pixel
 		swarm_info_list.append(info_dic)
