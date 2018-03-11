@@ -98,22 +98,28 @@ def plot_speeds(df):
 ## Depth processing
 
 def depth_variation(df):
-	variations = np.std(df['Depth_start'])+np.std(df['Depth_stop'])+np.std(df['Sample_count'])
-	if variations > 1:
-		print('Warning: there was a change in the depth per pixel!', variations)
+	v_dstart,v_dstop,v_sc = set(df['Depth_start']),set(df['Depth_stop']),set(df['Sample_count'])
+	if len(v_dstart)>1 or len(v_dstop)>1 or len(v_sc)>1:
+		print('Warning: there was a change in the depth per pixel!')
+		print('Values of depth_start found in the file:',v_dstart)
+		print('Values of depth_stop:',v_dstop)
+		print('Values of Sample_count:',v_sc)
 		return True
 	return False
 
 def get_depth_per_pixel(df):
-	if not depth_variation(df):
-		print('Start depth (in meters):',df['Depth_start'][0])
-		print('Stop depth (in meters):',df['Depth_stop'][0])
-		print('Nb of pixels along depth axis:',df['Sample_count'][0])
-		pixel_depth =  (df['Range_stop'][0] - df['Range_start'][0])/df['Sample_count'][0]
-		print('Depth per pixel (in meters):',pixel_depth)
-		return pixel_depth
-	else:
-		raise ValueError('The calibration of the depth has changed during the recording. Computation stopped.')
+	if depth_variation(df):
+		print("""!!!!!!!!!!!!!!!!!!!!!!!!!!!
+			WARNING: The calibration of the depth has changed during the recording.	
+			The results may be corrupted.
+			!!!!!!!!!!!!!!!!!!!!!!!!!!!!!""")
+		#raise ValueError('The calibration of the depth has changed during the recording. Computation stopped.')
+	print('Start depth (in meters):',df['Depth_start'][0])
+	print('Stop depth (in meters):',df['Depth_stop'][0])
+	print('Nb of pixels along depth axis:',df['Sample_count'][0])
+	pixel_depth =  (df['Range_stop'][0] - df['Range_start'][0])/df['Sample_count'][0]
+	print('Depth per pixel (in meters):',pixel_depth)
+	return pixel_depth
 
 
 def compute_depth_data(df):
@@ -177,6 +183,8 @@ def fast_binary_impulse(image):
 	mask = image.copy()
 	rshift = np.roll(image,1,axis=1)
 	lshift = np.roll(image,-1,axis=1)
+	r2shift = np.roll(image,2,axis=1)
+	l2shift = np.roll(image,-2,axis=1)
 	grad = image - rshift + image - lshift
 	mask[grad>np.max(grad)/10]=1
 	mask[grad<=np.max(grad)/10]=0
@@ -186,7 +194,8 @@ def fast_binary_impulse(image):
 	
 	nb_noisy = np.sum(mask)
 	data_d = image.copy()
-	data_d[mask==1] = (rshift[mask==1] + lshift[mask==1]) / 2
+	data_d[mask==1] = (rshift[mask==1] + lshift[mask==1] +
+		r2shift[mask==1] + l2shift[mask==1]) / 4
 	print('Number of noisy pixels removed: ',nb_noisy)
 	return data_d
 
@@ -456,6 +465,8 @@ def swarm_infos(krill_chunk,info_df,depth_data,filename):
 
 def info_from_swarm_list(swarm_echo_list,echogram,info_df,depth_data,data_filename):
 	swarm_info_list = []
+	# Remove the vertical lines in the echogram
+	echogram = remove_vertical_lines(echogram)
 	# Correct for the amplification along depth	
 	echogram_rectif = remove_background_noise(echogram,depth_data)
 
@@ -484,3 +495,109 @@ def krill_brightness(swarm_infos_dic,data):
 	else:
 		krill_b_per_pixel = krill_b/window_surface
 	return krill_b,krill_b_per_pixel
+
+
+####################################################
+### sunrise and sunset function
+
+def suntime(date_time,latitude,longitude):
+	# -*- coding: utf-8 -*-
+	"""
+	Created on Thu Dec 21 10:36:23 2017
+
+	@author: Roland Proud
+	"""
+	import datetime as dt
+	import math
+
+	T    = date_time.timetuple() ### time (today) 
+	## (year, month, day, hour, minutes, seconds)
+	## lat lon for hobart, tasmania
+	#lat1 = -42.87
+	#lon1 = 147.32  
+
+	lat1 = latitude
+	lon1 = longitude
+
+	##define zenith
+	zenith   = 90
+	    #     zenith:      Sun's zenith for sunrise/sunset
+	    #     offical      = 90 degrees 50'
+	    #     civil        = 96 degrees
+	    #     nautical     = 102 degrees
+	    #     astronomical = 108 degrees
+	    
+	## convert the longitude to hour value and calculate an approximate time
+	lngHour = lon1/15.
+
+	##  For rising time:
+	riseT = T.tm_yday + ((6 - lngHour) / 24)
+	##  For setting time:
+	setT = T.tm_yday + ((18 - lngHour) / 24)
+
+	##  calculate the Sun's mean anomaly
+	riseM = (0.9856 * riseT)-3.289
+	setM  = (0.9856 * setT)-3.289
+
+
+	##  calculate the Sun's true longitude
+	riseL = np.mod((riseM + (1.916 * np.sin(np.radians(riseM)))+(0.020 * np.sin(np.radians(2 * riseM)))+ 282.634), 360)
+	setL  = np.mod((setM  + (1.916 * np.sin(np.radians(setM))) +(0.020 * np.sin(np.radians(2 * setM))) + 282.634), 360) 
+
+
+	##  calculate the Sun's right ascension 
+	riseRA = np.mod(np.degrees(math.atan(0.91764 * np.tan(np.radians(riseL)))),360)
+	setRA  = np.mod(np.degrees(math.atan(0.91764 * np.tan(np.radians(setL)))),360)
+
+	##  right ascension value needs to be in the same quadrant as L
+	riseRA = riseRA + ( ((np.floor(riseL/90)) * 90) - ((np.floor(riseRA/90)) * 90) )
+	setRA  = setRA  + ( ((np.floor(setL/90))  * 90) - ((np.floor(setRA/90))  * 90) )
+
+	##  right ascension value needs to be converted into hours
+	riseRA = riseRA/15
+	setRA  = setRA/15
+
+	##  calculate the Sun's declination
+	riseSinDec = 0.39782 * np.sin(np.radians(riseL))
+	riseCosDec = np.cos(math.asin(riseSinDec))
+	setSinDec  = 0.39782 * np.sin(np.radians(setL))
+	setCosDec  = np.cos(math.asin(setSinDec))
+
+	##  calculate the Sun's local hour angle
+	riseCosH = (np.cos(np.radians(zenith))-(riseSinDec*np.sin(np.radians(lat1)))/(riseCosDec*np.cos(np.radians(lat1))))
+	setCosH  = (np.cos(np.radians(zenith))-(setSinDec*np.sin(np.radians(lat1)))/(setCosDec*np.cos(np.radians(lat1))))
+
+	## CHECK
+	if (riseCosH >  1): 
+	    print('the sun never rises on this location')
+
+	if (setCosH < -1):
+	    print('the sun never sets on this location')
+
+	##  finish calculating H and convert into hours
+	riseH = (360 - np.degrees(math.acos(riseCosH)))/15
+	setH  = np.degrees(math.acos(setCosH)) / 15
+
+	##  calculate local mean time of rising/setting
+	riseT = riseH + riseRA - (0.06571 * riseT) - 6.622
+	setT  = setH + setRA - (0.06571 * setT) - 6.622
+
+	##  adjust back to UTC (decimal time)
+	riseUT = np.mod((riseT - lngHour),24)
+	setUT  = np.mod((setT  - lngHour),24)
+
+	#print(riseUT,setUT)
+
+	## convert time example
+	sunrise = (int(riseUT), int((riseUT*60) % 60), int((riseUT*3600) % 60))
+	sunrise_obj = dt.datetime(date_time.year,date_time.month,date_time.day,
+		sunrise[0],sunrise[1],sunrise[2])
+	#print("Sunrise %d:%02d.%02d" % sunrise)#(hours, minutes, seconds))
+
+	## convert time example
+	sunset = (int(setUT), int((setUT*60) % 60), int((setUT*3600) % 60))
+	sunset_obj = dt.datetime(date_time.year,date_time.month,date_time.day,
+		sunset[0],sunset[1],sunset[2])
+	#print("Sunset %d:%02d.%02d" % sunset)
+
+	return sunrise_obj,sunset_obj
