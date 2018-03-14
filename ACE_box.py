@@ -1,13 +1,15 @@
 """ Python module for ACE sonar data analysis
 
 """
-from datetime import datetime
+#from datetime import datetime
+import datetime
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import skimage
 import skimage.exposure
 from skimage.filters import gaussian, median
+import simplekml
 
 #########################################################
 ## Data extraction
@@ -48,7 +50,7 @@ def get_date(ping_date,ping_time,ping_milliseconds):
 
 	date_str = ping_date + ' ' + ping_time + ' ' + microseconds
 	format_str = '%Y-%m-%d %H:%M:%S %f'
-	return datetime.strptime(date_str,format_str)
+	return datetime.datetime.strptime(date_str,format_str)
 
 
 def compute_speed(distance,delta_time,units='km/h'):
@@ -481,6 +483,7 @@ def info_from_swarm_list(swarm_echo_list,echogram,info_df,depth_data,data_filena
 
 
 def krill_brightness(swarm_infos_dic,data):
+	eps = 10**(-100) # avoid log singularity
 	krill_start = swarm_infos_dic['ping_index_start']
 	krill_stop = swarm_infos_dic['ping_index_stop']
 	krill_top = int(swarm_infos_dic['depth_in_pixels']-swarm_infos_dic['height_in_pixels']/2)
@@ -494,7 +497,25 @@ def krill_brightness(swarm_infos_dic,data):
 		krill_b_per_pixel = 0
 	else:
 		krill_b_per_pixel = krill_b/window_surface
-	return krill_b,krill_b_per_pixel
+	return 10*np.log10(krill_b/10+eps),10*np.log10(krill_b_per_pixel/10+eps)
+
+
+#######
+### Filter out bad swarms
+def remove_bad_swarms(list_of_swarms):
+	filtered_swarm_list = [swarm for swarm in list_of_swarms 
+					if swarm['length']>0 and swarm['height']>0
+					and swarm['depth']< 140#80
+					#and 10*np.log10(swarm['biomass_per_pixel']/10)<-55
+					#and 10*np.log10(swarm['biomass_per_pixel']/10)>-90
+					and swarm['biomass_per_pixel']<-55
+					and swarm['biomass_per_pixel']>-90
+					and swarm['longitude']!=0
+					and swarm['boat speed']>7
+					and swarm['length']<1000]
+	print('Initial nb of swarms: {}, final nb of swarms: {}.'
+		.format(len(list_of_swarms),len(filtered_swarm_list)))
+	return filtered_swarm_list
 
 
 ####################################################
@@ -507,7 +528,6 @@ def suntime(date_time,latitude,longitude):
 
 	@author: Roland Proud
 	"""
-	import datetime as dt
 	import math
 
 	T    = date_time.timetuple() ### time (today) 
@@ -521,12 +541,12 @@ def suntime(date_time,latitude,longitude):
 
 	##define zenith
 	zenith   = 90
-	    #     zenith:      Sun's zenith for sunrise/sunset
-	    #     offical      = 90 degrees 50'
-	    #     civil        = 96 degrees
-	    #     nautical     = 102 degrees
-	    #     astronomical = 108 degrees
-	    
+		#     zenith:      Sun's zenith for sunrise/sunset
+		#     offical      = 90 degrees 50'
+		#     civil        = 96 degrees
+		#     nautical     = 102 degrees
+		#     astronomical = 108 degrees
+		
 	## convert the longitude to hour value and calculate an approximate time
 	lngHour = lon1/15.
 
@@ -569,10 +589,10 @@ def suntime(date_time,latitude,longitude):
 
 	## CHECK
 	if (riseCosH >  1): 
-	    print('the sun never rises on this location')
+		print('the sun never rises on this location')
 
 	if (setCosH < -1):
-	    print('the sun never sets on this location')
+		print('the sun never sets on this location')
 
 	##  finish calculating H and convert into hours
 	riseH = (360 - np.degrees(math.acos(riseCosH)))/15
@@ -590,14 +610,118 @@ def suntime(date_time,latitude,longitude):
 
 	## convert time example
 	sunrise = (int(riseUT), int((riseUT*60) % 60), int((riseUT*3600) % 60))
-	sunrise_obj = dt.datetime(date_time.year,date_time.month,date_time.day,
+	sunrise_obj = datetime.datetime(date_time.year,date_time.month,date_time.day,
 		sunrise[0],sunrise[1],sunrise[2])
 	#print("Sunrise %d:%02d.%02d" % sunrise)#(hours, minutes, seconds))
 
 	## convert time example
 	sunset = (int(setUT), int((setUT*60) % 60), int((setUT*3600) % 60))
-	sunset_obj = dt.datetime(date_time.year,date_time.month,date_time.day,
+	sunset_obj = datetime.datetime(date_time.year,date_time.month,date_time.day,
 		sunset[0],sunset[1],sunset[2])
 	#print("Sunset %d:%02d.%02d" % sunset)
 
 	return sunrise_obj,sunset_obj
+
+## hour statistics
+def hourly_values(swarm_list,value):
+	hours_list,values_list = [],[]
+	for swarm in swarm_list:
+		swarm_date = get_date(swarm['date'],swarm['time'],'000')
+		sunrise,sunset = suntime(swarm_date,swarm['latitude'],swarm['longitude'])
+		#print(sunrise,sunset,sunset-sunrise)
+		#sunrise = datetime.datetime(swarm_date)
+		time_after_sunrise = swarm_date - sunrise
+		#print(swarm_date,sunrise,time_after_sunrise)
+		#print(time_after_sunrise.days)
+		#if time_after_sunrise.days==0:
+		#    D.append(int(time_after_sunrise.seconds / 3600))
+		#else:
+		#    D.append(int(time_after_sunrise.seconds / 3600) - 24)
+		hours_list.append(int(time_after_sunrise.seconds / 3600))
+		values_list.append(swarm[value])
+		# CReate a dictionary of vlues, keys are time slots
+	hour_dic = {}
+	for h,value in zip(hours_list,values_list):
+		if not h in hour_dic.keys():
+			hour_dic[h] = [value]
+		else:
+			hour_dic[h].append(value)
+	# Extract information from the dic sliced per hour
+	hour_sec = []
+	time_position = []
+	mean_value = []
+	nb_krill = []
+	std_value = []
+	for key in hour_dic:
+		time_position.append(key)
+		hour_sec.append(hour_dic[key])
+		mean_value.append(np.mean(hour_dic[key]))
+		nb_krill.append(len(hour_dic[key]))
+		std_value.append(np.std(hour_dic[key]))
+	
+	return np.array([time_position,nb_krill,mean_value,std_value])
+
+## info on the boat route
+def info_path(info_df):
+	samples = np.linspace(5,len(info_df['Latitude'])-1,20,dtype=int)
+	lat = info_df['Latitude'][samples]
+	long = info_df['Longitude'][samples]
+	boat_speed = info_df['speed_averaged'][samples]
+	date = info_df['Ping_date'][samples]
+	time = info_df['Ping_time'][samples]
+	return pd.DataFrame(list(zip(long,lat,date,time,boat_speed)),
+						columns=['longitude','latitude','date','time','boat_speed'])
+
+## Detect missing time slots
+def missing_time_slots(list_of_dates):
+	# Create a dataframe from the list of dates:
+	date_df = pd.DataFrame(list_of_dates)
+	#date_df = date_df.sort_values(by=[0,1])
+	# Create a dataframe of date with format datetime:
+	t_df = pd.DataFrame(columns=['start_date','end_date'])
+	i=0
+	for idx,row in date_df.iterrows():
+		#print(datetime.datetime.strptime(row[0]+' '+row[1],'%Y-%m-%d %H:%M:%S'))
+		t_df.loc[i] = [datetime.datetime.strptime(row[0]+' '+row[1],'%Y-%m-%d %H:%M:%S'),
+					  datetime.datetime.strptime(row[2]+' '+row[3],'%Y-%m-%d %H:%M:%S')]
+		i+=1
+	# Sort the dataframe
+	t_df = t_df.sort_values(by=['start_date'])
+	t_df = t_df.reset_index()
+	# Displaying the missing dates
+	print('Missing time slots:')
+	for idx in range(len(t_df)-2):
+		if t_df.loc[idx+1]['start_date']>t_df.loc[idx]['end_date']+datetime.timedelta(seconds=300):
+			#print(t_df.loc[idx].values)
+			#print(t_df.loc[idx+1].values)
+			print('From ',t_df.loc[idx]['end_date'],' to ',t_df.loc[idx+1]['start_date'])
+
+## Save the boat route in a KML file to dosplay in Google map
+def path_to_KML(global_info_path,filename):
+	kml = simplekml.Kml()
+	#kml.newpoint(name="Start LEG", coords=[(-67.31008362 , -64.13891113)])  # lon, lat, optional height
+	#kml.newpoint(name="End LEG", coords=[(-68.01374659999999,-62.8915845)])  # lon, lat, optional height
+	for path_info in global_info_path:
+		speeds = [float(speed) for speed in list(path_info['boat_speed'])]
+		if len(speeds)==0:
+			boat_speed = 0
+		else:
+			boat_speed = np.mean(speeds)
+		path = list(path_info[['longitude','latitude']].itertuples(index=False, name=None))
+		filt_path = [coords for coords in path if coords!=(0,0)]
+		p = kml.newlinestring(name="Path", description='From '
+							  +path_info['date'].iloc[0]+' '
+							  +path_info['time'].iloc[0]+' to '
+							  +path_info['date'].iloc[-1]+' '
+							  +path_info['time'].iloc[-1] + '\n'
+							  +'Mean speed: ' +"{0:.2f}".format(boat_speed)+ ' km/h.',
+							coords=filt_path)
+		if boat_speed<20:
+			p.style.linestyle.color = simplekml.Color.blue
+		elif boat_speed<25:
+			p.style.linestyle.color = simplekml.Color.green
+		else:
+			p.style.linestyle.color = simplekml.Color.yellow
+		p.style.linestyle.width = 10
+	kml.save(filename)
+	print("data saved in file {}.".format(filename))
