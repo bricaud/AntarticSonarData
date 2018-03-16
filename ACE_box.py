@@ -624,6 +624,7 @@ def suntime(date_time,latitude,longitude):
 
 ## hour statistics
 def hourly_values(swarm_list,value):
+	day_duration_list = []
 	hours_list,values_list = [],[]
 	for swarm in swarm_list:
 		swarm_date = get_date(swarm['date'],swarm['time'],'000')
@@ -639,7 +640,11 @@ def hourly_values(swarm_list,value):
 		#    D.append(int(time_after_sunrise.seconds / 3600) - 24)
 		hours_list.append(int(time_after_sunrise.seconds / 3600))
 		values_list.append(swarm[value])
+		day_duration = sunset-sunrise
+		day_duration_list.append(day_duration.seconds/3600)
 		# CReate a dictionary of vlues, keys are time slots
+	print('Min day duration: {0:.1f}h, max day duration {1:.1f}h, mean day duration: {2:.1f}h.'
+		.format(np.min(day_duration_list),np.max(day_duration_list),np.mean(day_duration_list)))
 	hour_dic = {}
 	for h,value in zip(hours_list,values_list):
 		if not h in hour_dic.keys():
