@@ -25,6 +25,8 @@ def extract_data(filename,max_depth=100):
 	info_df['speed'] = speed_vector
 	info_df['speed_averaged'] = speed_averaged_vector
 	data_trunc = cut_echogram(data,max_depth,depth_data)
+	#depth_data['mean_reflection_per_depth'] = np.mean(data_trunc,axis=1)
+	print('Mean data value: {0:.2f} dB.'.format(np.mean(data_trunc)))
 	print('-----------------------------')
 	return info_df,data_trunc,depth_data
 
@@ -110,25 +112,27 @@ def depth_variation(df):
 	return False
 
 def get_depth_per_pixel(df):
+	depth_change = 0
 	if depth_variation(df):
 		print("""!!!!!!!!!!!!!!!!!!!!!!!!!!!
 			WARNING: The calibration of the depth has changed during the recording.	
 			The results may be corrupted.
 			!!!!!!!!!!!!!!!!!!!!!!!!!!!!!""")
+		depth_change = 1
 		#raise ValueError('The calibration of the depth has changed during the recording. Computation stopped.')
 	print('Start depth (in meters):',df['Depth_start'][0])
 	print('Stop depth (in meters):',df['Depth_stop'][0])
 	print('Nb of pixels along depth axis:',df['Sample_count'][0])
 	pixel_depth =  (df['Range_stop'][0] - df['Range_start'][0])/df['Sample_count'][0]
 	print('Depth per pixel (in meters):',pixel_depth)
-	return pixel_depth
+	return pixel_depth,depth_change
 
 
 def compute_depth_data(df):
 	depth_data = {}
 	transducer_depth = 8.4 # transducer under the ship, below the see level	
 	depth_data['depth_start'] = transducer_depth + df['Range_start'][0]
-	depth_data['depth_per_pixel'] = get_depth_per_pixel(df)
+	depth_data['depth_per_pixel'],depth_data['depth_change'] = get_depth_per_pixel(df)
 	depth_data['depth_stop'] = df['Depth_stop'][0]
 	return depth_data
 
@@ -198,13 +202,15 @@ def fast_binary_impulse(image):
 	data_d = image.copy()
 	data_d[mask==1] = (rshift[mask==1] + lshift[mask==1] +
 		r2shift[mask==1] + l2shift[mask==1]) / 4
-	print('Number of noisy pixels removed: ',nb_noisy)
+	print('Number of noisy pixels removed: ',int(nb_noisy))
 	return data_d
 
 def remove_vertical_lines(image):
 	#databi = binary_impulse(image.transpose(), threshold=np.max(image))
 	#return databi.transpose()
 	data_clean = fast_binary_impulse(image)
+	# A secpnd pass to clean the residuals
+	data_clean = fast_binary_impulse(data_clean)
 	return data_clean
 
 def substract_meanovertime(image):
@@ -213,9 +219,9 @@ def substract_meanovertime(image):
 	return image - np.mean(image,1,keepdims=True)
 
 def substract_lin_meanovertime(echogram):
-	lin_echogram = 10**(echogram/20)
+	lin_echogram = 10**(echogram/10)
 	data_lin = lin_echogram - np.mean(lin_echogram,1,keepdims=True)
-	echogram_f = 20*np.log10(data_lin-np.min(data_lin)+0.00001)
+	echogram_f = 10*np.log10(data_lin-np.min(data_lin)+0.00001)
 	return echogram_f
 
 def gaussian_filter(image):
@@ -289,7 +295,7 @@ def extract_krillchunks(binary_signal,data):
 	""" Return a list of numpy array
 	Each array corresponds to a krill swarm
 	"""
-	minimal_swarm_length = 2
+	minimal_swarm_length = 3
 	krill_chunks = []
 	data_len = len(binary_signal)
 	for idx in range(data_len):
@@ -312,8 +318,6 @@ def process_chunk(data,krill_start,krill_stop):
 	krill_dic['Ping_end_index'] = krill_stop
 	krill_dic['data'] = data[:,krill_start:krill_stop+1]
 	# Check if several swarms in the data
-	#data_t = krill_dic['data'].transpose()
-	#binary_signal,energy = krill_function(data_t)
 	swarm_list = separate_verticalswarms(krill_dic)
 	return swarm_list
 
@@ -325,6 +329,7 @@ def separate_verticalswarms(krill_dic):
 	#print('min',min_echo)
 	data_list = []
 	data_len = len(binary_signal)
+	minimal_swarm_depth = 3
 	isolated_swarm_list = []
 	for idx in range(data_len):
 		if binary_signal[idx] >0:
@@ -333,18 +338,20 @@ def separate_verticalswarms(krill_dic):
 				krill_start_depth = idx
 			if idx == data_len-1 or binary_signal[idx+1] == 0:
 				# end of krill swarm
-				single_swarm_dic = {}
-				single_swarm_dic['Ping_start_index'] = krill_dic['Ping_start_index'] 
-				single_swarm_dic['Ping_end_index'] = krill_dic['Ping_end_index']
-				single_swarm = np.ones(data.shape) * min_echo
-				single_swarm[krill_start_depth:idx+1,:] = data[krill_start_depth:idx+1,:]
-				#print(single_swarm.shape, krill_start_depth, idx+1)
-				single_swarm_dic['data'] = single_swarm				
-				#RESIZE SWARM LENGTH HERE
-				single_swarm_dic = tighten_swarm_window(single_swarm_dic)
-				#print(single_swarm_dic['data'].shape)
-				# store krill layer in list
-				isolated_swarm_list.append(single_swarm_dic)
+				# Check if length is too small (artefact)
+				if idx - krill_start_depth >= minimal_swarm_depth:
+					single_swarm_dic = {}
+					single_swarm_dic['Ping_start_index'] = krill_dic['Ping_start_index'] 
+					single_swarm_dic['Ping_end_index'] = krill_dic['Ping_end_index']
+					single_swarm = np.ones(data.shape) * min_echo
+					single_swarm[krill_start_depth:idx+1,:] = data[krill_start_depth:idx+1,:]
+					#print(single_swarm.shape, krill_start_depth, idx+1)
+					single_swarm_dic['data'] = single_swarm				
+					#RESIZE SWARM LENGTH HERE
+					single_swarm_dic = tighten_swarm_window(single_swarm_dic)
+					#print(single_swarm_dic['data'].shape)
+					# store krill layer in list
+					isolated_swarm_list.append(single_swarm_dic)
 	return isolated_swarm_list
 
 def tighten_swarm_window(single_swarm_dic):
@@ -353,10 +360,12 @@ def tighten_swarm_window(single_swarm_dic):
 	energy = np.sqrt(np.sum(data**2,0))
 	max_brightness = np.max(energy)
 	data_len = len(energy)
-	rate = 0.1 # rate threshold
+	rate = 0.2 # rate threshold
 	#reduce on the left
+	single_swarm_dic['tightened'] =0
 	for idx in range(data_len):
 		if energy[idx] < max_brightness*rate:
+			single_swarm_dic['tightened'] += 1
 			single_swarm_dic['Ping_start_index'] +=1
 			single_swarm_dic['data'] = single_swarm_dic['data'][:,1:]
 		else:
@@ -364,11 +373,36 @@ def tighten_swarm_window(single_swarm_dic):
 	#reduce on the right
 	for idx in range(data_len):
 		if energy[data_len - 1 - idx] < max_brightness*rate:
+			single_swarm_dic['tightened'] += 1
 			single_swarm_dic['Ping_end_index'] -=1
 			single_swarm_dic['data'] = single_swarm_dic['data'][:,:-1]
 		else:
 			break
 	return single_swarm_dic
+
+
+def krill_gradient(data):
+	gradient = 0
+	# min size of 3 by 3
+	if data.shape[0]<3 or data.shape[1]<3:
+		return gradient
+	core = data[1:-1,1:-1]
+	core_mean = np.mean(core)
+	rate = 0.5 # rate threshold
+	borders = [data[:,0], data[:,-1], data[0,:], data[-1,:]]
+	for border in borders:
+		if np.mean(border)<core_mean*rate:
+			gradient += 1
+	if data.shape[0]<5 or data.shape[1]<5:
+		return gradient
+	core_mean = np.mean(data[2:-2,2:-2])
+	rate = 0.6 # rate threshold
+	borders = [data[:,0:2], data[:,-2:], data[0:2,:], data[-2:,:]]
+	for border in borders:
+		if np.mean(border)<core_mean*rate:
+			gradient += 1
+	return gradient
+
 
 ###########################################################################
 ## Extraction of krill characteristics
@@ -411,11 +445,12 @@ def swarm_depth(data):
 	binary_signal,energy = krill_function(data_t)
 	data_len = len(binary_signal)
 	# initialize
+	surface_limit = 15 # no krill above this limit in pixels (turbulences)
 	height = 0
 	mean_point = 0
 	for idx in range(data_len):
-		if binary_signal[idx] >0:
-			if idx==0 or binary_signal[idx-1] == 0:
+		if idx>surface_limit and binary_signal[idx] >0:
+			if idx == surface_limit+1 or binary_signal[idx-1] == 0:
 				# start of krill swarm
 				swarm_top = idx
 			if idx == data_len-1 or binary_signal[idx+1] == 0:
@@ -446,6 +481,7 @@ def swarm_infos(krill_chunk,info_df,depth_data,filename):
 	krill_stop = krill_chunk['Ping_end_index']
 	krill_info['ping_index_start'] = krill_start
 	krill_info['ping_index_stop'] = krill_stop
+	krill_info['tightened'] = krill_chunk['tightened']
 	krill_info['filename'] = filename 
 	krill_length_in_pings = krill_stop-krill_start
 	krill_length = (info_df['Distance_gps'][krill_stop] -
@@ -461,6 +497,8 @@ def swarm_infos(krill_chunk,info_df,depth_data,filename):
 	mean_depth,height = swarm_depth(krill_chunk['data'])
 	krill_info['depth_in_pixels'] = mean_depth
 	krill_info['height_in_pixels'] = height
+	krill_info['gradient'] = krill_gradient(
+		krill_chunk['data'][int(mean_depth-height/2):int(mean_depth+height/2),:])
 	krill_info['depth'] = get_sample_depth(mean_depth,depth_data)
 	krill_info['height'] = height * depth_data['depth_per_pixel']
 	return krill_info
@@ -469,14 +507,20 @@ def info_from_swarm_list(swarm_echo_list,echogram,info_df,depth_data,data_filena
 	swarm_info_list = []
 	# Remove the vertical lines in the echogram
 	echogram = remove_vertical_lines(echogram)
+	#echogram = remove_vertical_lines(echogram)
 	# Correct for the amplification along depth	
 	echogram_rectif = remove_background_noise(echogram,depth_data)
-
+	mean_reflection_per_depth = 10*np.log10(np.mean(10**(echogram_rectif/10),axis=1))
+	mean_reflection_per_depth_g = np.mean(echogram_rectif,axis=1)
 	for swarm_echo in swarm_echo_list:
 		info_dic = swarm_infos(swarm_echo,info_df,depth_data,data_filename)
-		biomass,biomass_per_pixel = krill_brightness(info_dic,echogram_rectif)
+		biomass,biomass_per_pixel,biomass_per_pixel_g = krill_brightness(info_dic,echogram_rectif)
 		info_dic['biomass'] = biomass
 		info_dic['biomass_per_pixel'] = biomass_per_pixel
+		info_dic['biomass_per_pixel_g'] = biomass_per_pixel_g
+		swarm_depth = int(info_dic['depth_in_pixels'])
+		info_dic['mean_reflection_at_swarm_depth'] = mean_reflection_per_depth[swarm_depth]
+		info_dic['mean_reflection_at_swarm_depth_g'] = mean_reflection_per_depth_g[swarm_depth]
 		swarm_info_list.append(info_dic)
 	return swarm_info_list
 		
@@ -492,25 +536,30 @@ def krill_brightness(swarm_infos_dic,data):
 	krill_window = data[krill_top:krill_bottom+1,krill_start:krill_stop]
 	#return krill_window
 	krill_b = np.sum(10**(krill_window/10))
-	window_surface = (krill_stop - krill_start) * (krill_bottom - krill_top)
+	#window_surface = (krill_stop - krill_start) * (krill_bottom - krill_top)
+	window_surface = krill_window.size
 	if window_surface == 0:
 		krill_b_per_pixel = 0
 	else:
 		krill_b_per_pixel = krill_b/window_surface
-	return 10*np.log10(krill_b/10+eps),10*np.log10(krill_b_per_pixel/10+eps)
+	return 10*np.log10(krill_b+eps),10*np.log10(krill_b_per_pixel+eps),np.mean(krill_window)
 
 
 #######
 ### Filter out bad swarms
 def remove_bad_swarms(list_of_swarms):
 	filtered_swarm_list = [swarm for swarm in list_of_swarms 
-					if swarm['length']>0 and swarm['height']>0
+					if swarm['length']>0 
+					and swarm['height']>0
+					and swarm['height']<80
 					and swarm['depth']< 140#80
 					#and 10*np.log10(swarm['biomass_per_pixel']/10)<-55
 					#and 10*np.log10(swarm['biomass_per_pixel']/10)>-90
-					and swarm['biomass_per_pixel']<-55
-					and swarm['biomass_per_pixel']>-90
+					and swarm['biomass_per_pixel']<-40
+					and swarm['biomass_per_pixel']>-85
+					#and swarm['biomass_per_pixel_g']>swarm['mean_reflection_at_swarm_depth_g']+0.9
 					and swarm['longitude']!=0
+					and swarm['gradient']>3 
 					and swarm['boat speed']>7
 					and swarm['length']<1000]
 	print('Initial nb of swarms: {}, final nb of swarms: {}.'
